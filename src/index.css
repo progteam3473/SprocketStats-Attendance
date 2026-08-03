@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+:root {
+    --theme-bg: color-mix(in oklch, oklch(0.19 0.02 265) 92%, transparent);
+    --theme-button-bg: oklch(0.27 0.03 265);
+    --theme-border: oklch(0.33 0.02 265);
+    --theme-text: oklch(0.93 0.01 265);
+    --theme-subtext-color: oklch(0.7 0.02 265);
+    --theme-h1-color: oklch(0.98 0 0);
+    --theme-text-contrast: oklch(0.85 0.16 85);
+}
+
+body {
+    min-height: 100vh;
+    color: var(--theme-text);
+    background:
+        radial-gradient(1200px 600px at 80% -10%, oklch(0.3 0.06 265 / 0.5), transparent 60%),
+        radial-gradient(900px 500px at 10% 110%, oklch(0.3 0.06 85 / 0.35), transparent 60%),
+        oklch(0.15 0.02 265);
+    background-attachment: fixed;
+}
+
+.theme-text { color: var(--theme-text); }
+.theme-subtext-color { color: var(--theme-subtext-color); }
+.theme-h1-color { color: var(--theme-h1-color); }
+.theme-text-contrast { color: var(--theme-text-contrast); }
+.theme-border { border-color: var(--theme-border); }
+.theme-bg { background: var(--theme-bg); }
+
+.theme-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--theme-border) transparent;
+}
