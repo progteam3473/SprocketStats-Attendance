@@ -1,4 +1,4 @@
-const API = import.meta.env.VITE_BACKEND_URL
+const API = import.meta.env.VITE_BACKEND_URL.replace(/\/+$/, "")
 
 export interface VerifyIdResult {
     name: string
@@ -32,4 +32,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 export const verifyCode = (code: string) => post<boolean>("/kiosk/verify_code", { code })
 export const verifyId = (id: string) => post<VerifyIdResult>("/kiosk/verify_id", { id })
+export const verifyCheckinCode = (memberCode: string, adminCode: string) =>
+    post<VerifyIdResult>("/kiosk/verify_checkin_code", { member_code: memberCode, admin_code: adminCode })
+export const lookupMember = (code: string) => post<{ name: string }>("/kiosk/lookup_member", { code })
 export const kioskLogout = () => post<{ ok: boolean }>("/kiosk/verify_logout", {})
