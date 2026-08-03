@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { CheckCircle2, KeyRound, LogOut, ScanLine, XCircle } from "lucide-react"
+import { CheckCircle2, KeyRound, LogOut, XCircle } from "lucide-react"
 import { ApiError, kioskLogout, verifyId, type VerifyIdResult } from "@/lib/api"
 
 const RESULT_DISMISS_MS = 3500
@@ -96,7 +96,9 @@ export default function KioskPage({ onDeauthorized, onManualCheckin }: {
                     </div>
                 ) : (
                     <div className="flex flex-col items-center gap-4 py-4 text-center">
-                        <ScanLine size={64} className="theme-text-contrast" />
+                        <span className="material-symbols-outlined" style={{ fontSize: 64, color: "white" }}>
+                            contactless
+                        </span>
                         <div>
                             <p className="text-xs font-semibold tracking-wider theme-subtext-color">CHECK IN / CHECK OUT</p>
                             <h2 className="text-xl font-bold theme-text">Ready to tap</h2>

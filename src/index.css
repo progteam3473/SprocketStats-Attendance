@@ -7,7 +7,7 @@
     --theme-text: oklch(0.93 0.01 265);
     --theme-subtext-color: oklch(0.7 0.02 265);
     --theme-h1-color: oklch(0.98 0 0);
-    --theme-text-contrast: oklch(0.85 0.16 85);
+    --theme-text-contrast: oklch(0.7 0.15 140);
 }
 
 body {
@@ -30,4 +30,12 @@ body {
 .theme-scrollbar {
     scrollbar-width: thin;
     scrollbar-color: var(--theme-border) transparent;
+}
+
+.material-symbols-outlined {
+    font-variation-settings:
+        'FILL' 0,
+        'wght' 400,
+        'GRAD' 0,
+        'opsz' 24;
 }
