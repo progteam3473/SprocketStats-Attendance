@@ -1,10 +1,10 @@
 [package]
-name = "app"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+name = "sprocketstats-attendance"
+version = "1.0.0"
+description = "Team Sprocket attendance kiosk"
+authors = ["Team Sprocket 3473"]
+license = "ISC"
+repository = "https://github.com/progteam3473/SprocketStats-Attendance"
 edition = "2021"
 rust-version = "1.77.2"
 
@@ -22,7 +22,6 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 pcsc = "2"
-enigo = "0.3"
 
 [profile.release]
 lto = true

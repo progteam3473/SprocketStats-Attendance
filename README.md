@@ -89,3 +89,17 @@ deploy the web build to Vercel.
   - Linux: `~/.local/share/org.team3473.attendance/logs/`
   - macOS: `~/Library/Logs/org.team3473.attendance/`
   - Windows: `%LOCALAPPDATA%\org.team3473.attendance\logs\`
+
+## Releasing
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds Windows
+(`.msi`/`.exe`), macOS (universal `.dmg`) and Linux (`.deb`/`.rpm`/`.AppImage`)
+installers and publishes them as a GitHub release.
+
+1. Set the repository variable `VITE_BACKEND_URL` (Settings > Secrets and
+   variables > Actions > Variables) to the production backend URL. It is baked
+   into the installers, and the release fails if it is missing.
+2. Bump `version` in both `package.json` and `src-tauri/Cargo.toml`
+   (`tauri.conf.json` reads `package.json`). The workflow refuses a tag that
+   doesn't match both.
+3. Commit, then tag and push: `git tag v1.0.1 && git push origin v1.0.1`.

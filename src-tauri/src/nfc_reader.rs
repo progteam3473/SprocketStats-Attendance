@@ -1,18 +1,21 @@
 use std::ffi::{CStr, CString};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use pcsc::{Card, Context, Disposition, Error as PcscError, Protocols, Scope, ShareMode,
            MAX_BUFFER_SIZE};
+use tauri::{AppHandle, Emitter, State};
 
 // --- config -----------------------------------------------------------------
 const ID_LENGTH: Option<usize> = Some(21); // exact expected length; None accepts any length
 const POLL_INTERVAL: Duration = Duration::from_millis(100); // between connection attempts
-const TYPE_DELAY: Duration = Duration::from_millis(50); // pause before pressing Enter
 const MAX_PAGE: u8 = 0x28; // don't read past NTAG213 user memory
 const HOLD_SECONDS: f64 = 1.0; // green window after a scan; also locks out the next tap
-const REJECT_SECONDS: f64 = 1.5; // red blink window after a bad tag
+const REJECT_SECONDS: f64 = 1.5; // red blink window after a bad tag or a backend rejection
+const FEEDBACK_TIMEOUT: Duration = Duration::from_secs(10); // max wait for the frontend's verdict; must exceed its 8s request timeout
+const SCAN_EVENT: &str = "nfc-scan"; // event name the frontend listens on; payload is the id
 const READER_RECHECK_EVERY: u32 = 20; // consecutive connect failures between reader-presence checks
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1); // session-restart backoff, start
 const MAX_BACKOFF: Duration = Duration::from_secs(30); // session-restart backoff, cap
@@ -255,20 +258,59 @@ fn hold_led(card: &Card, state: u8, seconds: f64, t2: u8) {
 }
 
 // --- output -----------------------------------------------------------------
-fn type_out(enigo: &mut Enigo, text: &str) {
-    if let Err(e) = enigo.text(text) {
-        log::warn!("Typing failed: {e}");
-        return;
+/// Managed Tauri state: the sending half of the scan-feedback channel. The
+/// receiving half lives on the NFC thread (see `start_nfc_loop`).
+pub struct FeedbackSender(pub Mutex<Sender<bool>>);
+
+/// Tauri command: the frontend reports whether the backend accepted the id
+/// from the most recent `nfc-scan` event. Called as
+/// `invoke("nfc_feedback", { ok })`. Replies that arrive while no scan is
+/// pending are discarded before the next scan is emitted.
+#[tauri::command]
+pub fn nfc_feedback(ok: bool, feedback: State<'_, FeedbackSender>) {
+    let tx = feedback.0.lock().unwrap_or_else(|e| e.into_inner());
+    if tx.send(ok).is_err() {
+        log::warn!("Scan feedback dropped: NFC thread is not listening.");
     }
-    thread::sleep(TYPE_DELAY);
-    if let Err(e) = enigo.key(Key::Return, Direction::Click) {
-        log::warn!("Enter failed: {e}");
+}
+
+/// Hand the id to the frontend and block until it reports the backend's
+/// verdict. Returns true only on an explicit acceptance; a rejection, a
+/// timeout, or a failed emit all count as "not accepted".
+fn submit_scan(app: &AppHandle, feedback: &Receiver<bool>, uid: &str, id: &str) -> bool {
+    // a late reply to a previous scan must not be mistaken for this one
+    while feedback.try_recv().is_ok() {}
+
+    if let Err(e) = app.emit(SCAN_EVENT, id) {
+        log::warn!("{uid}: failed to emit {SCAN_EVENT}: {e}");
+        return false;
+    }
+
+    match feedback.recv_timeout(FEEDBACK_TIMEOUT) {
+        Ok(true) => true,
+        Ok(false) => {
+            log::warn!("{uid}: backend rejected id {id}");
+            false
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            log::warn!(
+                "{uid}: no feedback for id {id} within {:.1}s; treating as rejected.",
+                FEEDBACK_TIMEOUT.as_secs_f64()
+            );
+            false
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            log::error!("{uid}: feedback channel closed; treating as rejected.");
+            false
+        }
     }
 }
 
 // --- main -------------------------------------------------------------------
-fn handle_tag(card: &Card, last_uid: &mut Option<String>, enigo: &mut Enigo)
-    -> Result<(), CardError>
+/// Read one tag, emit its id to the frontend, and show the backend's verdict
+/// on the LED. The card stays connected throughout so the LED can be driven.
+fn handle_tag(card: &Card, last_uid: &mut Option<String>, app: &AppHandle,
+              feedback: &Receiver<bool>) -> Result<(), CardError>
 {
     let uid = get_uid(card)?;
     if last_uid.as_deref() == Some(uid.as_str()) {
@@ -289,22 +331,27 @@ fn handle_tag(card: &Card, last_uid: &mut Option<String>, enigo: &mut Enigo)
             hold_led(card, LED_BLINK_RED, REJECT_SECONDS, 0x02);
         }
         Some(t) => {
-            log::info!("Typing scanned id: {t}");
-            type_out(enigo, &t);
-            log::info!("Holding {HOLD_SECONDS:.1}s for verification...");
-            hold_led(card, LED_GREEN_THEN_RED, HOLD_SECONDS, 0x00);
+            log::info!("Scanned id: {t}; awaiting backend verdict...");
+            if submit_scan(app, feedback, &uid, &t) {
+                log::info!("Accepted; holding {HOLD_SECONDS:.1}s...");
+                hold_led(card, LED_GREEN_THEN_RED, HOLD_SECONDS, 0x00);
+            } else {
+                hold_led(card, LED_BLINK_RED, REJECT_SECONDS, 0x02);
+            }
         }
     }
     Ok(())
 }
 
-/// Entry point spawned as a background thread from `lib.rs`. Never returns:
-/// on a session-fatal error (PC/SC context or Enigo init failure), it logs
+/// Entry point spawned as a background thread from `lib.rs`. Scanned ids are
+/// emitted to the frontend as `nfc-scan` events on `app`; the frontend's
+/// verdict comes back through `feedback`, fed by the `nfc_feedback` command.
+/// Never returns: on a session-fatal error (PC/SC context failure), it logs
 /// and retries with exponential backoff so the app stays self-healing.
-pub fn start_nfc_loop() -> ! {
+pub fn start_nfc_loop(app: AppHandle, feedback: Receiver<bool>) -> ! {
     let mut backoff = INITIAL_BACKOFF;
     loop {
-        if let Err(e) = run_session() {
+        if let Err(e) = run_session(&app, &feedback) {
             log::error!("NFC session ended: {e}");
             thread::sleep(backoff);
             backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -314,16 +361,17 @@ pub fn start_nfc_loop() -> ! {
     }
 }
 
-/// Establishes the PC/SC context and Enigo once, then repeatedly discovers a
-/// reader and polls it until it disappears, re-discovering as needed.
-fn run_session() -> Result<(), Box<dyn std::error::Error>> {
+/// Establishes the PC/SC context once, then repeatedly discovers a reader and
+/// polls it until it disappears, re-discovering as needed.
+fn run_session(app: &AppHandle, feedback: &Receiver<bool>)
+    -> Result<(), Box<dyn std::error::Error>>
+{
     let ctx = Context::establish(Scope::User)?;
-    let mut enigo = Enigo::new(&Settings::default())?;
 
     loop {
         let reader = discover_reader(&ctx)?;
         log::info!("Reader: {}", reader.to_string_lossy());
-        poll_reader(&ctx, &reader, &mut enigo);
+        poll_reader(&ctx, &reader, app, feedback);
         log::warn!("Reader disappeared: {}", reader.to_string_lossy());
     }
 }
@@ -347,7 +395,7 @@ fn discover_reader(ctx: &Context) -> Result<CString, Box<dyn std::error::Error>>
 
 /// Connect/poll loop for a single reader. Returns when the reader is no
 /// longer present so the caller can re-discover.
-fn poll_reader(ctx: &Context, reader: &CStr, enigo: &mut Enigo) {
+fn poll_reader(ctx: &Context, reader: &CStr, app: &AppHandle, feedback: &Receiver<bool>) {
     let mut last_uid: Option<String> = None;
     let mut consecutive_failures: u32 = 0;
 
@@ -356,7 +404,7 @@ fn poll_reader(ctx: &Context, reader: &CStr, enigo: &mut Enigo) {
             Ok(card) => {
                 consecutive_failures = 0;
 
-                if let Err(e) = handle_tag(&card, &mut last_uid, enigo) {
+                if let Err(e) = handle_tag(&card, &mut last_uid, app, feedback) {
                     log::warn!("Read error: {e}");
                     last_uid = None;
                 }
@@ -379,5 +427,275 @@ fn poll_reader(ctx: &Context, reader: &CStr, enigo: &mut Enigo) {
         }
 
         thread::sleep(POLL_INTERVAL);
+    }
+}
+// --- tests ------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXPECTED_LEN: usize = 21;
+
+    fn digits(n: usize) -> String {
+        (0..n).map(|i| char::from(b'0' + (i % 10) as u8)).collect()
+    }
+
+    /// Well-known text payload: status byte, language code, text.
+    fn text_payload(status: u8, lang: &[u8], text: &[u8]) -> Vec<u8> {
+        let mut p = vec![status];
+        p.extend_from_slice(lang);
+        p.extend_from_slice(text);
+        p
+    }
+
+    /// Short record (SR), MB|ME set, optional ID field.
+    fn short_record(tnf: u8, rec_type: &[u8], id: Option<&[u8]>, payload: &[u8]) -> Vec<u8> {
+        let mut header = 0xC0 | 0x10 | (tnf & 0x07);
+        if id.is_some() {
+            header |= 0x08;
+        }
+        let mut r = vec![header, rec_type.len() as u8, payload.len() as u8];
+        if let Some(id) = id {
+            r.push(id.len() as u8);
+        }
+        r.extend_from_slice(rec_type);
+        if let Some(id) = id {
+            r.extend_from_slice(id);
+        }
+        r.extend_from_slice(payload);
+        r
+    }
+
+    fn en_text(text: &str) -> Vec<u8> {
+        short_record(0x01, b"T", None, &text_payload(0x02, b"en", text.as_bytes()))
+    }
+
+    // --- parse_text_record ---------------------------------------------------
+    #[test]
+    fn parses_short_text_record() {
+        let id = digits(EXPECTED_LEN);
+        assert_eq!(parse_text_record(&en_text(&id)), Some(id));
+    }
+
+    #[test]
+    fn rejects_wrong_tnf() {
+        for tnf in [0x00, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07] {
+            let rec = short_record(tnf, b"T", None, &text_payload(0x02, b"en", b"123"));
+            assert_eq!(parse_text_record(&rec), None, "tnf {tnf}");
+        }
+    }
+
+    #[test]
+    fn rejects_non_text_type() {
+        let uri = short_record(0x01, b"U", None, &[0x04, b'a', b'b', b'c']);
+        assert_eq!(parse_text_record(&uri), None);
+        let long_type = short_record(0x01, b"Tx", None, &text_payload(0x02, b"en", b"123"));
+        assert_eq!(parse_text_record(&long_type), None);
+    }
+
+    #[test]
+    fn rejects_utf16_flag() {
+        let rec = short_record(0x01, b"T", None, &text_payload(0x82, b"en", b"1\x002\x00"));
+        assert_eq!(parse_text_record(&rec), None);
+    }
+
+    #[test]
+    fn rejects_empty_and_truncated_input() {
+        assert_eq!(parse_text_record(&[]), None);
+        assert_eq!(parse_text_record(&[0xD1]), None);
+        assert_eq!(parse_text_record(&[0xD1, 0x01, 0x05]), None);
+        // header complete but payload missing entirely
+        assert_eq!(parse_text_record(&[0xD1, 0x01, 0x05, b'T']), None);
+        // type length runs past the end
+        assert_eq!(parse_text_record(&[0xD1, 0x05, 0x01, b'T']), None);
+        // long record with a truncated 4-byte payload length
+        assert_eq!(parse_text_record(&[0xC1, 0x01, 0x00, 0x00]), None);
+        // ID flag set but ID length byte missing
+        assert_eq!(parse_text_record(&[0xD9, 0x01, 0x05]), None);
+        // language code longer than the payload
+        let rec = short_record(0x01, b"T", None, &[0x10, b'e', b'n']);
+        assert_eq!(parse_text_record(&rec), None);
+    }
+
+    #[test]
+    fn truncated_payload_yields_partial_text_rejected_by_id_check() {
+        let id = digits(EXPECTED_LEN);
+        let mut rec = en_text(&id);
+        rec.truncate(rec.len() - 5);
+        let text = parse_text_record(&rec).expect("clamped like a Python slice");
+        assert_eq!(text, id[..EXPECTED_LEN - 5]);
+        assert!(!is_valid_id(&text));
+    }
+
+    #[test]
+    fn parses_record_with_id_field() {
+        let id = digits(EXPECTED_LEN);
+        let rec = short_record(0x01, b"T", Some(b"ab"),
+                               &text_payload(0x02, b"en", id.as_bytes()));
+        assert_eq!(parse_text_record(&rec), Some(id));
+    }
+
+    #[test]
+    fn parses_long_record() {
+        let id = digits(EXPECTED_LEN);
+        let payload = text_payload(0x02, b"en", id.as_bytes());
+        let mut rec = vec![0xC1, 0x01];
+        rec.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        rec.push(b'T');
+        rec.extend_from_slice(&payload);
+        assert_eq!(parse_text_record(&rec), Some(id));
+    }
+
+    #[test]
+    fn ignores_trailing_bytes_after_payload() {
+        let id = digits(EXPECTED_LEN);
+        let mut rec = en_text(&id);
+        rec.extend_from_slice(b"\xFE\x00\x00");
+        assert_eq!(parse_text_record(&rec), Some(id));
+    }
+
+    #[test]
+    fn drops_non_ascii_bytes() {
+        let rec = short_record(0x01, b"T", None, &text_payload(0x02, b"en", b"12\xC2\xB23"));
+        assert_eq!(parse_text_record(&rec), Some("123".to_string()));
+    }
+
+    #[test]
+    fn empty_language_code_is_allowed() {
+        let rec = short_record(0x01, b"T", None, &text_payload(0x00, b"", b"42"));
+        assert_eq!(parse_text_record(&rec), Some("42".to_string()));
+    }
+
+    // --- tlv_span ------------------------------------------------------------
+    #[test]
+    fn tlv_span_short_length() {
+        assert_eq!(tlv_span(&[0x03, 0x00]), 2);
+        assert_eq!(tlv_span(&[0x03, 0x1B, 0xD1, 0x01]), 2 + 0x1B);
+        assert_eq!(tlv_span(&[0x03, 0xFE]), 2 + 0xFE);
+    }
+
+    #[test]
+    fn tlv_span_three_byte_length() {
+        assert_eq!(tlv_span(&[0x03, 0xFF, 0x01, 0x00]), 4 + 0x100);
+        assert_eq!(tlv_span(&[0x03, 0xFF, 0x00, 0x05, 0xAA]), 4 + 5);
+        // header not fully read yet: ask for enough to see it
+        assert_eq!(tlv_span(&[0x03, 0xFF]), 48);
+        assert_eq!(tlv_span(&[0x03, 0xFF, 0x01]), 48);
+    }
+
+    #[test]
+    fn tlv_span_not_ndef_or_too_short() {
+        assert_eq!(tlv_span(&[]), 0);
+        assert_eq!(tlv_span(&[0x03]), 1);
+        assert_eq!(tlv_span(&[0x01, 0x03, 0xA0, 0x10]), 4);
+        assert_eq!(tlv_span(&[0x00; 16]), 16);
+    }
+
+    // --- take ----------------------------------------------------------------
+    #[test]
+    fn take_in_bounds() {
+        assert_eq!(take(&[1, 2, 3, 4, 5], 1, 3), vec![2, 3, 4]);
+        assert_eq!(take(&[1, 2, 3], 0, 3), vec![1, 2, 3]);
+        assert_eq!(take(&[1, 2, 3], 1, 0), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn take_clamps() {
+        assert_eq!(take(&[1, 2, 3], 1, 10), vec![2, 3]);
+        assert_eq!(take(&[1, 2, 3], 3, 1), Vec::<u8>::new());
+        assert_eq!(take(&[1, 2, 3], 10, 1), Vec::<u8>::new());
+        assert_eq!(take(&[1, 2, 3], 1, usize::MAX), vec![2, 3]);
+        assert_eq!(take(&[], 0, 5), Vec::<u8>::new());
+    }
+
+    // --- is_valid_id ---------------------------------------------------------
+    #[test]
+    fn valid_id_accepts_expected_digits() {
+        assert!(is_valid_id(&digits(EXPECTED_LEN)));
+        assert!(is_valid_id(&"0".repeat(EXPECTED_LEN)));
+    }
+
+    #[test]
+    fn valid_id_rejects_empty() {
+        assert!(!is_valid_id(""));
+    }
+
+    #[test]
+    fn valid_id_enforces_length() {
+        assert_eq!(ID_LENGTH, Some(EXPECTED_LEN));
+        assert!(!is_valid_id(&digits(EXPECTED_LEN - 1)));
+        assert!(!is_valid_id(&digits(EXPECTED_LEN + 1)));
+        assert!(!is_valid_id("1"));
+    }
+
+    #[test]
+    fn valid_id_rejects_non_digits() {
+        let base = digits(EXPECTED_LEN - 1);
+        for c in ['a', ' ', '-', '+', '.', '\n', '\0'] {
+            let s = format!("{base}{c}");
+            assert_eq!(s.len(), EXPECTED_LEN);
+            assert!(!is_valid_id(&s), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn valid_id_rejects_unicode_digits() {
+        // 19 ASCII digits + a 2-byte char == 21 bytes, so only the digit check can reject
+        let base = digits(EXPECTED_LEN - 2);
+        for c in ['²', '٣', '½'] {
+            assert!(c.is_numeric());
+            assert_eq!(c.len_utf8(), 2);
+            let s = format!("{base}{c}");
+            assert_eq!(s.len(), EXPECTED_LEN);
+            assert!(!is_valid_id(&s), "{s:?}");
+        }
+        // and a 21-char string with a multibyte digit is rejected too
+        assert!(!is_valid_id(&format!("{}²", digits(EXPECTED_LEN - 1))));
+    }
+
+    // --- timing --------------------------------------------------------------
+    #[test]
+    fn timing_small() {
+        assert_eq!(timing(HOLD_SECONDS), (10, 1));
+        assert_eq!(timing(REJECT_SECONDS), (15, 1));
+        assert_eq!(timing(0.1), (1, 1));
+        assert_eq!(timing(0.14), (1, 1));
+        assert_eq!(timing(0.15), (2, 1));
+    }
+
+    #[test]
+    fn timing_exactly_255_units() {
+        assert_eq!(timing(25.5), (255, 1));
+    }
+
+    #[test]
+    fn timing_over_255_units_splits_into_reps() {
+        assert_eq!(timing(25.6), (128, 2));
+        assert_eq!(timing(30.0), (150, 2));
+        assert_eq!(timing(51.0), (255, 2));
+        assert_eq!(timing(51.1), (170, 3));
+        for secs in [25.6, 30.0, 60.0, 100.0, 600.0, 6502.5] {
+            let (t1, reps) = timing(secs);
+            let units = (secs * 10.0).round() as i64;
+            assert!(t1 >= 1 && reps >= 2, "{secs}: ({t1}, {reps})");
+            let total = t1 as i64 * reps as i64;
+            // never longer than asked, and short by less than one rep
+            assert!(total <= units && units - total < reps as i64, "{secs}: {total} vs {units}");
+        }
+    }
+
+    #[test]
+    fn timing_caps_at_max_sequence() {
+        assert_eq!(timing(6502.5), (255, 255));
+        assert_eq!(timing(1.0e6), (255, 255));
+    }
+
+    #[test]
+    fn timing_zero_and_negative_clamp_to_one_unit() {
+        assert_eq!(timing(0.0), (1, 1));
+        assert_eq!(timing(0.04), (1, 1));
+        assert_eq!(timing(-1.0), (1, 1));
+        assert_eq!(timing(-1.0e9), (1, 1));
+        assert_eq!(timing(f64::NAN), (1, 1));
     }
 }
