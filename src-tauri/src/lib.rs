@@ -1,5 +1,6 @@
 mod nfc_reader;
 
+use std::sync::{mpsc, Mutex};
 use std::thread;
 
 use tauri::Manager;
@@ -20,16 +21,20 @@ pub fn run() {
         )
         // 1. Setup hook runs when the app starts up
         .setup(|app| {
+            // Fullscreen, no titlebar and always-on-top come from tauri.conf.json;
+            // just make sure the kiosk window has focus.
             if let Some(main_window) = app.get_webview_window("main") {
-                // Force fullscreen, remove titlebar, and keep on top
-                let _ = main_window.set_fullscreen(true);
-                let _ = main_window.set_decorations(false);
-                let _ = main_window.set_always_on_top(true);
                 let _ = main_window.set_focus();
             }
 
+            // Scan feedback channel: the `nfc_feedback` command sends the
+            // frontend's verdict, the NFC thread waits on it after each scan.
+            let (feedback_tx, feedback_rx) = mpsc::channel();
+            app.manage(nfc_reader::FeedbackSender(Mutex::new(feedback_tx)));
+
             // Spawn the NFC loop on a background thread on startup
-            thread::spawn(nfc_reader::start_nfc_loop);
+            let handle = app.handle().clone();
+            thread::spawn(move || nfc_reader::start_nfc_loop(handle, feedback_rx));
 
             Ok(())
         })
@@ -40,8 +45,8 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        // 3. Register your IPC commands here if you have any
-        .invoke_handler(tauri::generate_handler![])
+        // 3. IPC commands callable from the frontend
+        .invoke_handler(tauri::generate_handler![nfc_reader::nfc_feedback])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

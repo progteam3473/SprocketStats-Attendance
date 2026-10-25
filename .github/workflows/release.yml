@@ -1,0 +1,89 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tag is the release's name, so it must match the app version
+      # (package.json, which tauri.conf.json reads, and Cargo.toml).
+      - name: Check tag matches version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./package.json').version")
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          if [ "$tag" != "$pkg" ] || [ "$tag" != "$cargo" ]; then
+            echo "Tag v$tag doesn't match package.json ($pkg) / Cargo.toml ($cargo)"
+            exit 1
+          fi
+
+      # Baked into the frontend at build time; without it the app can't reach
+      # the backend. Set it under Settings > Secrets and variables > Actions.
+      - name: Check backend URL is configured
+        shell: bash
+        run: |
+          if [ -z "${{ vars.VITE_BACKEND_URL }}" ]; then
+            echo "Repository variable VITE_BACKEND_URL is not set"
+            exit 1
+          fi
+
+      - name: Install Tauri and PC/SC system dependencies
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libpcsclite-dev \
+            build-essential \
+            pkg-config
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ startsWith(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VITE_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
+        with:
+          tagName: v__VERSION__
+          releaseName: SprocketStats Attendance v__VERSION__
+          releaseBody: See the assets below to download and install this version.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

@@ -1,4 +1,7 @@
-const API = import.meta.env.VITE_BACKEND_URL.replace(/\/+$/, "")
+const API = (import.meta.env.VITE_BACKEND_URL ?? "").replace(/\/+$/, "")
+
+// A hung request would leave the kiosk stuck "submitting" and dropping scans.
+const REQUEST_TIMEOUT_MS = 8000
 
 export interface VerifyIdResult {
     name: string
@@ -15,12 +18,22 @@ export class ApiError extends Error {
 // The kiosk_auth cookie set by verify_code is httponly, so every call just
 // rides on credentials: "include" — the browser attaches it for us.
 async function post<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(`${API}${path}`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    })
+    let res: Response
+    try {
+        res = await fetch(`${API}${path}`, {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        })
+    } catch (err) {
+        // fetch only rejects on network failure or our timeout; neither has a
+        // message worth showing on the kiosk screen.
+        throw new Error(err instanceof DOMException && err.name === "TimeoutError"
+            ? "Server took too long to respond"
+            : "Can't reach the server")
+    }
     if (!res.ok) {
         const detail = await res.json()
             .then((d: { detail?: unknown }) => (typeof d?.detail === "string" ? d.detail : null))

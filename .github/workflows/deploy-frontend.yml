@@ -14,19 +14,25 @@ jobs:
       - name: Deploy to Vercel
         id: deploy
         run: |
-          npx vercel --prod --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tee /tmp/deploy.log
-          grep -o 'https://vercel.com/[^[:space:]]*BX[^[:space:]]*' /tmp/deploy.log | head -1 > /tmp/inspect_url.txt || true
+          set -o pipefail
+          status=0
+          npx vercel --prod --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tee /tmp/deploy.log || status=$?
+          grep -oE 'https://vercel\.com/[^[:space:]]+' /tmp/deploy.log | head -1 > /tmp/inspect_url.txt || true
+          exit $status
         env:
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
 
       - name: Fetch full build logs on failure
         if: failure()
-        working-directory: ./frontend
         run: |
-          INSPECT_URL=$(cat /tmp/inspect_url.txt)
+          INSPECT_URL=$(cat /tmp/inspect_url.txt 2>/dev/null || true)
+          if [ -z "$INSPECT_URL" ]; then
+            echo "No Vercel inspect URL found in deploy output; skipping log fetch."
+            exit 0
+          fi
           echo "Inspect URL: $INSPECT_URL"
-          npx vercel logs "$INSPECT_URL" --token=${{ secrets.VERCEL_TOKEN }} 2>&1
+          npx vercel logs "$INSPECT_URL" --token=${{ secrets.VERCEL_TOKEN }} 2>&1 || true
         env:
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
