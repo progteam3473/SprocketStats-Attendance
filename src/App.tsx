@@ -1,4 +1,6 @@
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
+import { isTauri } from "@tauri-apps/api/core"
+import ExitPage from "@/pages/ExitPage"
 import SetupPage from "@/pages/SetupPage"
 import KioskPage from "@/pages/KioskPage"
 import ManualCheckinPage from "@/pages/ManualCheckinPage"
@@ -19,10 +21,28 @@ export default function App() {
         setScreen("kiosk")
     }, [])
 
+    // Hidden admin shortcut to the exit prompt; only the desktop app can quit.
+    const [exiting, setExiting] = useState(false)
+    useEffect(() => {
+        if (!isTauri()) return
+        const onKey = (e: KeyboardEvent) => {
+            if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "q") {
+                e.preventDefault()
+                setExiting(true)
+            }
+        }
+        window.addEventListener("keydown", onKey)
+        return () => window.removeEventListener("keydown", onKey)
+    }, [])
+
     const handleDeauthorized = useCallback(() => {
         localStorage.removeItem(AUTH_FLAG)
         setScreen("setup")
     }, [])
+
+    // Replaces the screen rather than overlaying it: the kiosk page would
+    // otherwise keep pulling focus back to its hidden scan input.
+    if (exiting) return <ExitPage onCancel={() => setExiting(false)} />
 
     switch (screen) {
         case "kiosk":

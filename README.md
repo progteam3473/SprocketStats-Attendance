@@ -82,8 +82,11 @@ deploy the web build to Vercel.
 ## Kiosk behavior
 
 - The window is fullscreen, undecorated and always on top.
-- Closing the window is blocked. To quit, kill the process (for example from a
-  terminal or the task manager).
+- Closing the window is blocked. To quit, press Ctrl+Shift+Q and enter the
+  admin exit code (ask a captain). The code is checked in Rust against
+  `EXIT_CODE_SHA256` in `src-tauri/src/lib.rs`; to change it, replace that
+  hash with the output of `printf '%s' 'NewCode' | sha256sum`. Killing the
+  process (task manager, `pkill`) also works.
 - Logs go to stdout and to the OS app log directory for the identifier
   `org.team3473.attendance`:
   - Linux: `~/.local/share/org.team3473.attendance/logs/`
