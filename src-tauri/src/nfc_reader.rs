@@ -12,8 +12,8 @@ use tauri::{AppHandle, Emitter, State};
 const ID_LENGTH: Option<usize> = Some(21); // exact expected length; None accepts any length
 const POLL_INTERVAL: Duration = Duration::from_millis(100); // between connection attempts
 const MAX_PAGE: u8 = 0x28; // don't read past NTAG213 user memory
-const HOLD_SECONDS: f64 = 1.0; // green window after a scan; also locks out the next tap
-const REJECT_SECONDS: f64 = 1.5; // red blink window after a bad tag or a backend rejection
+pub const HOLD_SECONDS: f64 = 1.0; // green window after a scan; also locks out the next tap
+pub const REJECT_SECONDS: f64 = 1.5; // red blink window after a bad tag or a backend rejection
 const FEEDBACK_TIMEOUT: Duration = Duration::from_secs(10); // max wait for the frontend's verdict; must exceed its 8s request timeout
 const SCAN_EVENT: &str = "nfc-scan"; // event name the frontend listens on; payload is the id
 const READER_RECHECK_EVERY: u32 = 20; // consecutive connect failures between reader-presence checks
@@ -22,7 +22,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30); // session-restart backof
 
 // --- errors -----------------------------------------------------------------
 #[derive(Debug)]
-enum CardError {
+pub enum CardError {
     Pcsc(PcscError),
     Status(u8, u8),
     ShortResponse,
@@ -45,7 +45,7 @@ impl std::fmt::Display for CardError {
 }
 
 // --- reader -----------------------------------------------------------------
-fn find_reader(ctx: &Context) -> Result<Option<CString>, PcscError> {
+pub fn find_reader(ctx: &Context) -> Result<Option<CString>, PcscError> {
     let mut buf = [0u8; 2048];
     let available: Vec<&CStr> = ctx.list_readers(&mut buf)?.collect();
     if available.is_empty() {
@@ -80,13 +80,25 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-fn get_uid(card: &Card) -> Result<String, CardError> {
+pub fn get_uid(card: &Card) -> Result<String, CardError> {
     Ok(hex(&transmit(card, &[0xFF, 0xCA, 0x00, 0x00, 0x00])?))
 }
 
 /// READ BINARY: FF B0 00 <page> <len>. 16 bytes == 4 NTAG pages.
 fn read_pages(card: &Card, start_page: u8, nbytes: u8) -> Result<Vec<u8>, CardError> {
     transmit(card, &[0xFF, 0xB0, 0x00, start_page, nbytes])
+}
+
+/// UPDATE BINARY: FF D6 00 <page> 04 <4 bytes>, one NTAG page per command.
+/// `data` must be a whole number of pages; see `encode_text_tlv`.
+pub fn write_pages(card: &Card, start_page: u8, data: &[u8]) -> Result<(), CardError> {
+    for (i, chunk) in data.chunks(4).enumerate() {
+        let page = start_page + i as u8;
+        let mut apdu = vec![0xFF, 0xD6, 0x00, page, 0x04];
+        apdu.extend_from_slice(chunk);
+        transmit(card, &apdu)?;
+    }
+    Ok(())
 }
 
 // --- NDEF -------------------------------------------------------------------
@@ -112,7 +124,7 @@ fn take(mem: &[u8], start: usize, len: usize) -> Vec<u8> {
 }
 
 /// Read only as many pages as the TLV length calls for.
-fn read_ndef_message(card: &Card) -> Result<Option<Vec<u8>>, CardError> {
+pub fn read_ndef_message(card: &Card) -> Result<Option<Vec<u8>>, CardError> {
     let mut mem = read_pages(card, 0x04, 16)?;
     if mem.first() != Some(&0x03) {
         return Ok(None);
@@ -139,7 +151,7 @@ fn read_ndef_message(card: &Card) -> Result<Option<Vec<u8>>, CardError> {
 }
 
 /// Parse the first NDEF record; return its text payload or None.
-fn parse_text_record(msg: &[u8]) -> Option<String> {
+pub fn parse_text_record(msg: &[u8]) -> Option<String> {
     if msg.len() < 4 {
         return None;
     }
@@ -196,8 +208,29 @@ fn parse_text_record(msg: &[u8]) -> Option<String> {
     Some(text.iter().filter(|b| b.is_ascii()).map(|&b| b as char).collect())
 }
 
+/// The exact bytes `read_ndef_message` + `parse_text_record` expect, starting
+/// at page 4: an NDEF TLV holding one short UTF-8 text record ("en"),
+/// a terminator TLV, then zero padding to a whole number of 4-byte pages.
+pub fn encode_text_tlv(text: &str) -> Vec<u8> {
+    let mut payload = vec![0x02, b'e', b'n'];
+    payload.extend_from_slice(text.as_bytes());
+    assert!(payload.len() <= 0xFF, "text too long for a short record");
+
+    let mut record = vec![0xD1, 0x01, payload.len() as u8, b'T']; // MB|ME|SR, Well-Known
+    record.extend_from_slice(&payload);
+    assert!(record.len() < 0xFF, "record too long for a 1-byte TLV length");
+
+    let mut mem = vec![0x03, record.len() as u8];
+    mem.extend_from_slice(&record);
+    mem.push(0xFE);
+    while mem.len() % 4 != 0 {
+        mem.push(0x00);
+    }
+    mem
+}
+
 /// Strict: ASCII digits only. char::is_numeric would accept superscripts, so don't.
-fn is_valid_id(text: &str) -> bool {
+pub fn is_valid_id(text: &str) -> bool {
     if text.is_empty() {
         return false;
     }
@@ -215,8 +248,8 @@ fn is_valid_id(text: &str) -> bool {
 //               3 grn-final-mask 2 red-final-mask 1 grn-final  0 red-final
 //   T1/T2 in units of 100 ms; the sequence runs in reader firmware, so it
 //   keeps going after the tag is lifted -- but transmit() blocks until it ends.
-const LED_GREEN_THEN_RED: u8 = 0xED; // solid green for T1, settle to red
-const LED_BLINK_RED: u8 = 0xDD; // blink red, settle to red
+pub const LED_GREEN_THEN_RED: u8 = 0xED; // solid green for T1, settle to red
+pub const LED_BLINK_RED: u8 = 0xDD; // blink red, settle to red
 #[allow(dead_code)]
 const LED_RED: u8 = 0x0D; // solid red now, unused today but part of the documented LED protocol
 
@@ -246,7 +279,7 @@ fn timing(seconds: f64) -> (u8, u8) {
 }
 
 /// Run an LED sequence and block for its full duration, tag present or not.
-fn hold_led(card: &Card, state: u8, seconds: f64, t2: u8) {
+pub fn hold_led(card: &Card, state: u8, seconds: f64, t2: u8) {
     let started = Instant::now();
     let (t1, reps) = timing(seconds);
     // tag lifted mid-command; fall through to the software wait
@@ -564,6 +597,31 @@ mod tests {
     fn empty_language_code_is_allowed() {
         let rec = short_record(0x01, b"T", None, &text_payload(0x00, b"", b"42"));
         assert_eq!(parse_text_record(&rec), Some("42".to_string()));
+    }
+
+    // --- encode_text_tlv -----------------------------------------------------
+    #[test]
+    fn encoded_tlv_round_trips_through_reader_parsing() {
+        let id = digits(EXPECTED_LEN);
+        let mem = encode_text_tlv(&id);
+        assert_eq!(mem[0], 0x03);
+        let span = tlv_span(&mem);
+        assert_eq!(span, 2 + mem[1] as usize);
+        assert_eq!(mem[span], 0xFE, "terminator TLV follows the message");
+        let msg = take(&mem, 2, mem[1] as usize);
+        assert_eq!(msg, en_text(&id));
+        let text = parse_text_record(&msg).expect("reader parses what we write");
+        assert_eq!(text, id);
+        assert!(is_valid_id(&text));
+    }
+
+    #[test]
+    fn encoded_tlv_is_whole_pages_within_ntag213() {
+        let mem = encode_text_tlv(&digits(EXPECTED_LEN));
+        assert_eq!(mem.len() % 4, 0);
+        // pages 4..=MAX_PAGE are readable user memory
+        assert!(mem.len() <= (MAX_PAGE as usize - 4 + 1) * 4);
+        assert!(mem[tlv_span(&mem) + 1..].iter().all(|&b| b == 0));
     }
 
     // --- tlv_span ------------------------------------------------------------

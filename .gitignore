@@ -3,3 +3,8 @@ dist/
 .env
 .env.local
 .idea/
+
+# Member exports and card-flashing logs hold student data
+members*.tsv
+members*.csv
+flashed-cards.tsv

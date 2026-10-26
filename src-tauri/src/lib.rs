@@ -1,4 +1,4 @@
-mod nfc_reader;
+pub mod nfc_reader;
 
 use std::sync::{mpsc, Mutex};
 use std::thread;

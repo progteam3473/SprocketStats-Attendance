@@ -79,6 +79,34 @@ CI (`.github/workflows/ci.yml`) builds the frontend and runs `cargo clippy` and
 `cargo test` on every pull request and push to `main`. Pushes to `main` also
 deploy the web build to Vercel.
 
+## Assigning cards
+
+A card holds one NDEF Text record containing the member's 21-digit ID (the `id`
+column of the members table). To flash a batch of cards with the ACR122U:
+
+1. Export the members table to `src-tauri/members.tsv` (tab- or comma-separated,
+   with the columns in table order: ID first, full name third). A header row is
+   fine. `members*.tsv`/`.csv` and the log are gitignored because they hold
+   student data. Don't commit them.
+2. Close the kiosk app, or it will also try to check in every card you tap.
+3. Run the script. It compiles the app library, so run `npm run build` once
+   first if `dist/` doesn't exist yet.
+
+   ```sh
+   cd src-tauri
+   cargo run --example flash_cards -- members.tsv
+   ```
+
+4. For each member, tap a blank card. The script writes the ID and reads it back
+   with the kiosk's own parser. A green LED means the card is done and you can
+   tap the next one. Press Enter to skip a member, or q + Enter to quit.
+
+Each finished card is logged to `flashed-cards.tsv`. Rerunning skips everyone
+already in the log, so you can stop and continue later. The script refuses a
+card that already holds a different member's ID unless you pass `--overwrite`.
+For a single new or lost card, writing the Text record with a phone app such as
+NFC Tools works too. Don't lock the card: locking is permanent.
+
 ## Kiosk behavior
 
 - The window is fullscreen, undecorated and always on top.
