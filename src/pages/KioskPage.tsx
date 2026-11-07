@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from "react"
-import { KeyRound, Nfc } from "lucide-react"
+import { Nfc, QrCode } from "lucide-react"
 import { ApiError, kioskLogout, verifyId } from "@/lib/api"
 import { useNfcScan } from "@/lib/nfc"
+import { useQrCheckin } from "@/lib/useQrCheckin"
 import { KioskHeader, LinkButton, ResultView, cardStyle, type ScanResult } from "@/components/kiosk"
 
 const RESULT_DISMISS_MS = 3500
 const CONFIRM_LOGOUT_MS = 10000
 
-export default function KioskPage({ onDeauthorized, onManualCheckin }: {
+export default function KioskPage({ onDeauthorized }: {
     onDeauthorized: () => void
-    onManualCheckin: () => void
 }) {
     const [id, setId] = useState("")
     const [result, setResult] = useState<ScanResult | null>(null)
@@ -62,6 +62,12 @@ export default function KioskPage({ onDeauthorized, onManualCheckin }: {
 
     useNfcScan(submitScan)
 
+    // Members without their card scan this with their phone instead.
+    const qrImage = useQrCheckin(
+        ({ name, status }) => setResult({ kind: "success", name, status }),
+        onDeauthorized,
+    )
+
     function handleSubmit(e: React.FormEvent) {
         e.preventDefault()
         const scanned = id.trim()
@@ -80,11 +86,6 @@ export default function KioskPage({ onDeauthorized, onManualCheckin }: {
 
     return (
         <div className="relative min-h-screen flex flex-col items-center justify-center px-4 py-8 gap-6">
-            <LinkButton onClick={onManualCheckin} className="absolute top-4 right-4">
-                <KeyRound size={14} />
-                Manual check-in
-            </LinkButton>
-
             <KioskHeader />
 
             <div className="w-full max-w-xl rounded-xl border p-8 flex flex-col items-center gap-6 backdrop-blur-sm" style={cardStyle}>
@@ -94,6 +95,15 @@ export default function KioskPage({ onDeauthorized, onManualCheckin }: {
                         <div>
                             <p className="text-xs font-semibold tracking-wider theme-subtext-color">CHECK IN / CHECK OUT</p>
                             <h2 className="text-xl font-bold theme-text">Ready to tap</h2>
+                        </div>
+                        <div className="flex flex-col items-center gap-2 border-t pt-4 w-full" style={{ borderColor: "var(--theme-border)" }}>
+                            <p className="text-xs font-semibold tracking-wider theme-subtext-color flex items-center gap-1.5">
+                                <QrCode size={14} /> NO CARD? SCAN WITH YOUR PHONE
+                            </p>
+                            {qrImage
+                                ? <img src={qrImage} alt="Check-in QR code" width={224} height={224} className="rounded-lg" />
+                                : <div className="w-56 h-56 rounded-lg flex items-center justify-center text-sm theme-subtext-color border" style={{ borderColor: "var(--theme-border)" }}>QR code unavailable</div>}
+                            <p className="text-xs theme-subtext-color">Sign in to SprocketStats on your phone first.</p>
                         </div>
                     </div>
                 )}

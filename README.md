@@ -28,9 +28,11 @@ This is also how the Vercel web build receives scans, since it has no PC/SC acce
   sent with every later request.
 - **Kiosk page**: the main screen. It waits for card taps and shows each check-in
   result.
-- **Manual check-in**: for members without their card. The member enters their
-  offline code, then an admin countersigns by entering their own code or tapping
-  their card.
+- **QR check-in**: for members without their card. The kiosk shows a QR code that
+  rotates every 15 seconds and works once. The member scans it with their phone
+  (signed in to SprocketStats), which opens `/checkin` on the main app and checks
+  them in or out. Holding a live code proves they are at the kiosk, so no admin
+  countersign is needed. The kiosk polls the backend for the result.
 
 ## Prerequisites
 
