@@ -5,6 +5,13 @@ use std::thread;
 
 use tauri::Manager;
 
+/// Quits the app; the kiosk window blocks normal close events, so the
+/// frontend calls this after the admin exit code is typed.
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -46,7 +53,7 @@ pub fn run() {
             }
         })
         // 3. IPC commands callable from the frontend
-        .invoke_handler(tauri::generate_handler![nfc_reader::nfc_feedback])
+        .invoke_handler(tauri::generate_handler![nfc_reader::nfc_feedback, exit_app])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

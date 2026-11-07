@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { Nfc, QrCode } from "lucide-react"
+import { invoke, isTauri } from "@tauri-apps/api/core"
 import { ApiError, kioskLogout, verifyId } from "@/lib/api"
 import { useNfcScan } from "@/lib/nfc"
 import { useQrCheckin } from "@/lib/useQrCheckin"
@@ -7,6 +8,8 @@ import { KioskHeader, LinkButton, ResultView, cardStyle, type ScanResult } from 
 
 const RESULT_DISMISS_MS = 3500
 const CONFIRM_LOGOUT_MS = 10000
+// Typed on the kiosk keyboard (into the always-focused input) to quit the app.
+const ADMIN_EXIT_CODE = "Kottenisthegoat"
 
 export default function KioskPage({ onDeauthorized }: {
     onDeauthorized: () => void
@@ -72,6 +75,11 @@ export default function KioskPage({ onDeauthorized }: {
         e.preventDefault()
         const scanned = id.trim()
         setId("")
+        if (scanned === ADMIN_EXIT_CODE) {
+            // The window is fullscreen and refuses to close, so this is the only way out.
+            if (isTauri()) void invoke("exit_app")
+            return
+        }
         void submitScan(scanned)
     }
 
