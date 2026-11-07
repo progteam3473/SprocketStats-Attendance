@@ -45,7 +45,14 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 export const verifyCode = (code: string) => post<boolean>("/kiosk/verify_code", { code })
 export const verifyId = (id: string) => post<VerifyIdResult>("/kiosk/verify_id", { id })
-export const verifyCheckinCode = (memberCode: string, adminCode: string) =>
-    post<VerifyIdResult>("/kiosk/verify_checkin_code", { member_code: memberCode, admin_code: adminCode })
-export const lookupMember = (code: string) => post<{ name: string }>("/kiosk/lookup_member", { code })
+export interface QrCode {
+    token: string
+    url: string
+    expires_in: number
+}
+export interface QrScan extends VerifyIdResult {
+    token: string
+}
+export const fetchQrCode = () => post<QrCode>("/kiosk/qr_code", {})
+export const fetchQrScans = (tokens: string[]) => post<QrScan[]>("/kiosk/qr_status", { tokens })
 export const kioskLogout = () => post<{ ok: boolean }>("/kiosk/verify_logout", {})
