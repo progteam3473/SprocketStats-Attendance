@@ -1,5 +1,5 @@
 import type { ComponentProps, ReactNode, Ref } from "react"
-import { CheckCircle2, LogOut, XCircle, type LucideIcon } from "lucide-react"
+import { CheckCircle2, Loader2, LogOut, XCircle, type LucideIcon } from "lucide-react"
 import type { VerifyIdResult } from "@/lib/api"
 
 export const cardStyle = { background: "var(--theme-bg)", borderColor: "var(--theme-border)" }
@@ -42,6 +42,56 @@ export function ResultView({ result, size = "lg" }: { result: ScanResult, size?:
                 </>
             )}
         </div>
+    )
+}
+
+export type RecentEntry = { key: number, at: number, result: ScanResult }
+
+/** Compact list of the latest check-ins, newest first, with an optional "checking" row on top. */
+export function RecentList({ entries, pending, now, ttlMs, fadeMs }: {
+    entries: RecentEntry[]
+    pending: number
+    now: number
+    ttlMs: number
+    fadeMs: number
+}) {
+    if (!entries.length && !pending) return null
+    return (
+        <ul className="w-full flex flex-col gap-2">
+            {pending > 0 && (
+                <li className="flex items-center gap-3 rounded-lg border px-4 py-3 animate-pulse" style={fieldStyle}>
+                    <Loader2 size={24} className="theme-h1-color shrink-0 animate-spin" />
+                    <p className="text-lg font-semibold theme-text">
+                        Card read, checking…{pending > 1 ? ` (${pending} in line)` : ""}
+                    </p>
+                </li>
+            )}
+            {entries.map(({ key, at, result }) => (
+                <li
+                    key={key}
+                    className="flex items-center gap-3 rounded-lg border px-4 py-3 transition-opacity duration-1000"
+                    style={{ ...fieldStyle, opacity: now - at > ttlMs - fadeMs ? 0.35 : 1 }}
+                >
+                    {result.kind === "success" ? (
+                        <>
+                            {result.status === "checked_in"
+                                ? <CheckCircle2 size={24} className="theme-text-contrast shrink-0" />
+                                : <LogOut size={24} className="theme-subtext-color shrink-0" />}
+                            <p className="text-lg font-semibold theme-text truncate">
+                                {result.name} <span className="theme-subtext-color font-normal">
+                                    checked {result.status === "checked_in" ? "in" : "out"}
+                                </span>
+                            </p>
+                        </>
+                    ) : (
+                        <>
+                            <XCircle size={24} className="text-red-500 shrink-0" />
+                            <p className="text-lg font-semibold theme-text truncate">{result.message}</p>
+                        </>
+                    )}
+                </li>
+            ))}
+        </ul>
     )
 }
 

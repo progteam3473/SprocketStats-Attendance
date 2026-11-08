@@ -4,9 +4,14 @@ import { invoke, isTauri } from "@tauri-apps/api/core"
 import { ApiError, kioskLogout, verifyId } from "@/lib/api"
 import { useNfcScan } from "@/lib/nfc"
 import { useQrCheckin } from "@/lib/useQrCheckin"
-import { KioskHeader, LinkButton, ResultView, cardStyle, type ScanResult } from "@/components/kiosk"
+import { KioskHeader, LinkButton, RecentList, cardStyle, type RecentEntry, type ScanResult } from "@/components/kiosk"
 
-const RESULT_DISMISS_MS = 3500
+const MAX_RECENT = 5
+const ENTRY_TTL_MS = 18000
+const ENTRY_FADE_MS = 4000
+const MAX_QUEUE = 20
+// The same ID tapped again within this window is a double-tap, not a check-out.
+const DUPLICATE_WINDOW_MS = 2000
 const CONFIRM_LOGOUT_MS = 10000
 // Typed on the kiosk keyboard (into the always-focused input) to quit the app.
 const ADMIN_EXIT_CODE = "Kottenisthegoat"
@@ -15,10 +20,18 @@ export default function KioskPage({ onDeauthorized }: {
     onDeauthorized: () => void
 }) {
     const [id, setId] = useState("")
-    const [result, setResult] = useState<ScanResult | null>(null)
+    const [recent, setRecent] = useState<RecentEntry[]>([])
+    // Taps waiting on a verdict (queued plus the one in flight).
+    const [pending, setPending] = useState(0)
+    const [now, setNow] = useState(() => Date.now())
     const [confirmingLogout, setConfirmingLogout] = useState(false)
-    // A ref, not state: two scans can land before a re-render.
-    const inFlight = useRef(false)
+    // Refs, not state: several scans can land before a re-render.
+    const queue = useRef<{ id: string, resolve: (ok: boolean) => void }[]>([])
+    const processing = useRef(false)
+    const currentId = useRef<string | null>(null)
+    const lastSeen = useRef(new Map<string, number>())
+    const lastOutcome = useRef(new Map<string, Promise<boolean>>())
+    const nextKey = useRef(0)
     const inputRef = useRef<HTMLInputElement>(null)
 
     // Keyboard-wedge readers (and the web build) type into the hidden input,
@@ -30,11 +43,19 @@ export default function KioskPage({ onDeauthorized }: {
         return () => window.removeEventListener("click", refocus)
     }, [])
 
+    // Expire old entries so the screen clears once the line is gone.
     useEffect(() => {
-        if (!result) return
-        const t = window.setTimeout(() => setResult(null), RESULT_DISMISS_MS)
-        return () => window.clearTimeout(t)
-    }, [result])
+        if (!recent.length) return
+        const t = window.setInterval(() => {
+            const t = Date.now()
+            setNow(t)
+            setRecent((list) => {
+                const kept = list.filter((e) => t - e.at < ENTRY_TTL_MS)
+                return kept.length === list.length ? list : kept
+            })
+        }, 1000)
+        return () => window.clearInterval(t)
+    }, [recent.length])
 
     useEffect(() => {
         if (!confirmingLogout) return
@@ -42,32 +63,81 @@ export default function KioskPage({ onDeauthorized }: {
         return () => window.clearTimeout(t)
     }, [confirmingLogout])
 
-    async function submitScan(scanned: string): Promise<boolean> {
-        if (!scanned || inFlight.current) return false
-        inFlight.current = true
+    function addResult(result: ScanResult) {
+        const at = Date.now()
+        setNow(at)
+        setRecent((list) => [{ key: nextKey.current++, at, result }, ...list].slice(0, MAX_RECENT))
+    }
+
+    async function processQueue() {
+        if (processing.current) return
+        processing.current = true
         try {
-            const { name, status } = await verifyId(scanned)
-            setResult({ kind: "success", name, status })
-            return true
-        } catch (err) {
-            // The kiosk cookie is gone or expired — send it back through setup.
-            if (err instanceof ApiError && err.status === 401) {
-                onDeauthorized()
-                return false
+            let item
+            while ((item = queue.current.shift())) {
+                currentId.current = item.id
+                let ok = false
+                try {
+                    const { name, status } = await verifyId(item.id)
+                    addResult({ kind: "success", name, status })
+                    ok = true
+                } catch (err) {
+                    // The kiosk cookie is gone or expired — send it back through setup.
+                    if (err instanceof ApiError && err.status === 401) {
+                        for (const rest of queue.current) rest.resolve(false)
+                        queue.current = []
+                        setPending(0)
+                        item.resolve(false)
+                        onDeauthorized()
+                        return
+                    }
+                    addResult({ kind: "error", message: err instanceof Error ? err.message : "Scan failed" })
+                }
+                setPending(queue.current.length)
+                item.resolve(ok)
+                inputRef.current?.focus()
             }
-            setResult({ kind: "error", message: err instanceof Error ? err.message : "Scan failed" })
-            return false
         } finally {
-            inFlight.current = false
-            inputRef.current?.focus()
+            currentId.current = null
+            processing.current = false
         }
+    }
+
+    // Queues the tap and resolves with its verdict (drives the reader LED).
+    function submitScan(scanned: string): Promise<boolean> {
+        if (!scanned) return Promise.resolve(false)
+        const t = Date.now()
+        const last = lastSeen.current.get(scanned)
+        lastSeen.current.set(scanned, t)
+        for (const [k, v] of lastSeen.current) {
+            if (t - v > DUPLICATE_WINDOW_MS) lastSeen.current.delete(k)
+        }
+        const queued = queue.current.some((q) => q.id === scanned)
+        if (queued || currentId.current === scanned || (last !== undefined && t - last < DUPLICATE_WINDOW_MS)) {
+            // Double-tap: share the first tap's verdict instead of toggling again.
+            return lastOutcome.current.get(scanned) ?? Promise.resolve(true)
+        }
+        if (queue.current.length >= MAX_QUEUE) {
+            addResult({ kind: "error", message: "Too many taps at once, please wait" })
+            return Promise.resolve(false)
+        }
+        const outcome = new Promise<boolean>((resolve) => {
+            queue.current.push({ id: scanned, resolve })
+        })
+        lastOutcome.current.set(scanned, outcome)
+        void outcome.then(() => {
+            if (lastOutcome.current.get(scanned) === outcome) lastOutcome.current.delete(scanned)
+        })
+        setPending(queue.current.length + (processing.current ? 1 : 0))
+        void processQueue()
+        return outcome
     }
 
     useNfcScan(submitScan)
 
     // Members without their card scan this with their phone instead.
     const { image: qrImage, paused: qrPaused } = useQrCheckin(
-        ({ name, status }) => setResult({ kind: "success", name, status }),
+        ({ name, status }) => addResult({ kind: "success", name, status }),
         onDeauthorized,
     )
 
@@ -97,24 +167,23 @@ export default function KioskPage({ onDeauthorized }: {
             <KioskHeader />
 
             <div className="w-full max-w-xl rounded-xl border p-8 flex flex-col items-center gap-6 backdrop-blur-sm" style={cardStyle}>
-                {result ? <ResultView result={result} /> : (
-                    <div className="flex flex-col items-center gap-4 py-4 text-center">
-                        <Nfc size={64} className="theme-h1-color" />
-                        <div>
-                            <p className="text-xs font-semibold tracking-wider theme-subtext-color">CHECK IN / CHECK OUT</p>
-                            <h2 className="text-xl font-bold theme-text">Ready to tap</h2>
-                        </div>
-                        <div className="flex flex-col items-center gap-2 border-t pt-4 w-full" style={{ borderColor: "var(--theme-border)" }}>
-                            <p className="text-xs font-semibold tracking-wider theme-subtext-color flex items-center gap-1.5">
-                                <QrCode size={14} /> NO CARD? SCAN WITH YOUR PHONE
-                            </p>
-                            {qrImage
-                                ? <img src={qrImage} alt="Check-in QR code" width={224} height={224} className="rounded-lg" />
-                                : <div className="w-56 h-56 rounded-lg flex items-center justify-center text-sm theme-subtext-color border" style={{ borderColor: "var(--theme-border)" }}>{qrPaused ? "Tap the screen to show the QR code" : "QR code unavailable"}</div>}
-                            <p className="text-xs theme-subtext-color">Sign in to SprocketStats on your phone first.</p>
-                        </div>
+                <RecentList entries={recent} pending={pending} now={now} ttlMs={ENTRY_TTL_MS} fadeMs={ENTRY_FADE_MS} />
+                <div className="flex flex-col items-center gap-4 py-4 text-center">
+                    <Nfc size={recent.length || pending ? 40 : 64} className="theme-h1-color" />
+                    <div>
+                        <p className="text-xs font-semibold tracking-wider theme-subtext-color">CHECK IN / CHECK OUT</p>
+                        <h2 className="text-xl font-bold theme-text">Ready to tap</h2>
                     </div>
-                )}
+                    <div className="flex flex-col items-center gap-2 border-t pt-4 w-full" style={{ borderColor: "var(--theme-border)" }}>
+                        <p className="text-xs font-semibold tracking-wider theme-subtext-color flex items-center gap-1.5">
+                            <QrCode size={14} /> NO CARD? SCAN WITH YOUR PHONE
+                        </p>
+                        {qrImage
+                            ? <img src={qrImage} alt="Check-in QR code" width={224} height={224} className="rounded-lg" />
+                            : <div className="w-56 h-56 rounded-lg flex items-center justify-center text-sm theme-subtext-color border" style={{ borderColor: "var(--theme-border)" }}>{qrPaused ? "Tap the screen to show the QR code" : "QR code unavailable"}</div>}
+                        <p className="text-xs theme-subtext-color">Sign in to SprocketStats on your phone first.</p>
+                    </div>
+                </div>
 
                 {/* Invisible capture layer: a keyboard-wedge reader types into
                     this always-focused input; the trailing Enter submits it. */}

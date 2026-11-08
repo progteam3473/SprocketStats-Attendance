@@ -217,6 +217,7 @@ fn is_valid_id(text: &str) -> bool {
 //   keeps going after the tag is lifted -- but transmit() blocks until it ends.
 const LED_GREEN_THEN_RED: u8 = 0xED; // solid green for T1, settle to red
 const LED_BLINK_RED: u8 = 0xDD; // blink red, settle to red
+const LED_ORANGE: u8 = 0x0F; // solid orange (green + red) now: "card read, checking"
 #[allow(dead_code)]
 const LED_RED: u8 = 0x0D; // solid red now, unused today but part of the documented LED protocol
 
@@ -332,6 +333,8 @@ fn handle_tag(card: &Card, last_uid: &mut Option<String>, app: &AppHandle,
         }
         Some(t) => {
             log::info!("Scanned id: {t}; awaiting backend verdict...");
+            // instant "card read" cue; the verdict LED below overrides it
+            let _ = send_led(card, LED_ORANGE, 0, 0, 1, 0x00);
             if submit_scan(app, feedback, &uid, &t) {
                 log::info!("Accepted; holding {HOLD_SECONDS:.1}s...");
                 hold_led(card, LED_GREEN_THEN_RED, HOLD_SECONDS, 0x00);
