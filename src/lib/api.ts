@@ -1,4 +1,4 @@
-const API = (import.meta.env.VITE_BACKEND_URL ?? "").replace(/\/+$/, "")
+export const API = (import.meta.env.VITE_BACKEND_URL ?? "").replace(/\/+$/, "")
 
 // A hung request would leave the kiosk stuck "submitting" and dropping scans.
 const REQUEST_TIMEOUT_MS = 8000
