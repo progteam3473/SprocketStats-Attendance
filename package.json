@@ -1,6 +1,6 @@
 {
   "name": "sprocketstats-attendance",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "This app provides a kiosk for Sprocket's attendance and machine lockouts using RFID",
   "homepage": "https://github.com/progteam3473/SprocketStats-Attendance#readme",
   "bugs": {
