@@ -66,7 +66,7 @@ export default function KioskPage({ onDeauthorized }: {
     useNfcScan(submitScan)
 
     // Members without their card scan this with their phone instead.
-    const qrImage = useQrCheckin(
+    const { image: qrImage, paused: qrPaused } = useQrCheckin(
         ({ name, status }) => setResult({ kind: "success", name, status }),
         onDeauthorized,
     )
@@ -110,7 +110,7 @@ export default function KioskPage({ onDeauthorized }: {
                             </p>
                             {qrImage
                                 ? <img src={qrImage} alt="Check-in QR code" width={224} height={224} className="rounded-lg" />
-                                : <div className="w-56 h-56 rounded-lg flex items-center justify-center text-sm theme-subtext-color border" style={{ borderColor: "var(--theme-border)" }}>QR code unavailable</div>}
+                                : <div className="w-56 h-56 rounded-lg flex items-center justify-center text-sm theme-subtext-color border" style={{ borderColor: "var(--theme-border)" }}>{qrPaused ? "Tap the screen to show the QR code" : "QR code unavailable"}</div>}
                             <p className="text-xs theme-subtext-color">Sign in to SprocketStats on your phone first.</p>
                         </div>
                     </div>
