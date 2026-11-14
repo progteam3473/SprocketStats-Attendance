@@ -1,38 +1,50 @@
 import { useEffect, useRef, useState } from "react"
-import { Nfc, QrCode } from "lucide-react"
+import { CheckCircle2, Loader2, LogOut, XCircle } from "lucide-react"
 import { invoke, isTauri } from "@tauri-apps/api/core"
-import { ApiError, kioskLogout, verifyId } from "@/lib/api"
+import { ApiError, kioskLogout, scanCode, verifyId } from "@/lib/api"
+import { useServerClock } from "@/lib/clock"
 import { useNfcScan } from "@/lib/nfc"
-import { useQrCheckin } from "@/lib/useQrCheckin"
-import { KioskHeader, LinkButton, RecentList, cardStyle, type RecentEntry, type ScanResult } from "@/components/kiosk"
+import { useCodeScanner } from "@/lib/useCodeScanner"
+import { CameraPreview, PREVIEW_WIDTH } from "@/components/CameraPreview"
+import { CloseAppButton, KioskTitle, LinkButton } from "@/components/kiosk"
 
-const MAX_RECENT = 5
-const ENTRY_TTL_MS = 18000
-const ENTRY_FADE_MS = 4000
+// Results stack at the top, newest first: at most 4, each gone after 5 s.
+const MAX_POPUPS = 4
+const POPUP_TTL_MS = 5000
+const POPUP_FADE_MS = 600
 const MAX_QUEUE = 20
-// The same ID tapped again within this window is a double-tap, not a check-out.
+// The same card ID tapped again within this window is a double-tap, not a check-out.
 const DUPLICATE_WINDOW_MS = 2000
 const CONFIRM_LOGOUT_MS = 10000
 // Typed on the kiosk keyboard (into the always-focused input) to quit the app.
 const ADMIN_EXIT_CODE = "Kottenisthegoat"
 
+type Popup =
+    | { key: number, at: number, kind: "pending" }
+    | { key: number, at: number, kind: "success", name: string, status: "checked_in" | "checked_out" }
+    | { key: number, at: number, kind: "error", message: string }
+
+type PopupResult =
+    | { kind: "success", name: string, status: "checked_in" | "checked_out" }
+    | { kind: "error", message: string }
+
 export default function KioskPage({ onDeauthorized }: {
     onDeauthorized: () => void
 }) {
     const [id, setId] = useState("")
-    const [recent, setRecent] = useState<RecentEntry[]>([])
-    // Taps waiting on a verdict (queued plus the one in flight).
-    const [pending, setPending] = useState(0)
+    const [popups, setPopups] = useState<Popup[]>([])
     const [now, setNow] = useState(() => Date.now())
     const [confirmingLogout, setConfirmingLogout] = useState(false)
     // Refs, not state: several scans can land before a re-render.
-    const queue = useRef<{ id: string, resolve: (ok: boolean) => void }[]>([])
+    const queue = useRef<{ id: string, key: number, resolve: (ok: boolean) => void }[]>([])
     const processing = useRef(false)
     const currentId = useRef<string | null>(null)
     const lastSeen = useRef(new Map<string, number>())
     const lastOutcome = useRef(new Map<string, Promise<boolean>>())
     const nextKey = useRef(0)
     const inputRef = useRef<HTMLInputElement>(null)
+
+    useServerClock()
 
     // Keyboard-wedge readers (and the web build) type into the hidden input,
     // so it must always own focus. The built-in reader goes through useNfcScan.
@@ -43,19 +55,19 @@ export default function KioskPage({ onDeauthorized }: {
         return () => window.removeEventListener("click", refocus)
     }, [])
 
-    // Expire old entries so the screen clears once the line is gone.
+    // Expire popups so the stack clears once the line is gone.
     useEffect(() => {
-        if (!recent.length) return
+        if (!popups.length) return
         const t = window.setInterval(() => {
-            const t = Date.now()
-            setNow(t)
-            setRecent((list) => {
-                const kept = list.filter((e) => t - e.at < ENTRY_TTL_MS)
+            const n = Date.now()
+            setNow(n)
+            setPopups((list) => {
+                const kept = list.filter((p) => p.kind === "pending" || n - p.at < POPUP_TTL_MS)
                 return kept.length === list.length ? list : kept
             })
-        }, 1000)
+        }, 250)
         return () => window.clearInterval(t)
-    }, [recent.length])
+    }, [popups.length])
 
     useEffect(() => {
         if (!confirmingLogout) return
@@ -63,11 +75,19 @@ export default function KioskPage({ onDeauthorized }: {
         return () => window.clearTimeout(t)
     }, [confirmingLogout])
 
-    function addResult(result: ScanResult) {
-        const at = Date.now()
-        setNow(at)
-        setRecent((list) => [{ key: nextKey.current++, at, result }, ...list].slice(0, MAX_RECENT))
+    function addPending(): number {
+        const key = nextKey.current++
+        setNow(Date.now())
+        setPopups((list) => [{ key, at: Date.now(), kind: "pending" } as Popup, ...list].slice(0, MAX_POPUPS))
+        return key
     }
+
+    // A popup pushed out by newer ones is simply gone; its result is dropped.
+    function resolvePopup(key: number, result: PopupResult) {
+        setPopups((list) => list.map((p) => (p.key === key ? { ...result, key, at: Date.now() } : p)))
+    }
+
+    // --- Card taps (built-in NFC reader or a USB keyboard reader) -------------
 
     async function processQueue() {
         if (processing.current) return
@@ -79,21 +99,19 @@ export default function KioskPage({ onDeauthorized }: {
                 let ok = false
                 try {
                     const { name, status } = await verifyId(item.id)
-                    addResult({ kind: "success", name, status })
+                    resolvePopup(item.key, { kind: "success", name, status })
                     ok = true
                 } catch (err) {
                     // The kiosk cookie is gone or expired — send it back through setup.
                     if (err instanceof ApiError && err.status === 401) {
                         for (const rest of queue.current) rest.resolve(false)
                         queue.current = []
-                        setPending(0)
                         item.resolve(false)
                         onDeauthorized()
                         return
                     }
-                    addResult({ kind: "error", message: err instanceof Error ? err.message : "Scan failed" })
+                    resolvePopup(item.key, { kind: "error", message: err instanceof Error ? err.message : "Scan failed" })
                 }
-                setPending(queue.current.length)
                 item.resolve(ok)
                 inputRef.current?.focus()
             }
@@ -118,35 +136,46 @@ export default function KioskPage({ onDeauthorized }: {
             return lastOutcome.current.get(scanned) ?? Promise.resolve(true)
         }
         if (queue.current.length >= MAX_QUEUE) {
-            addResult({ kind: "error", message: "Too many taps at once, please wait" })
+            resolvePopup(addPending(), { kind: "error", message: "Too many taps at once, please wait" })
             return Promise.resolve(false)
         }
+        const key = addPending()
         const outcome = new Promise<boolean>((resolve) => {
-            queue.current.push({ id: scanned, resolve })
+            queue.current.push({ id: scanned, key, resolve })
         })
         lastOutcome.current.set(scanned, outcome)
         void outcome.then(() => {
             if (lastOutcome.current.get(scanned) === outcome) lastOutcome.current.delete(scanned)
         })
-        setPending(queue.current.length + (processing.current ? 1 : 0))
         void processQueue()
         return outcome
     }
 
     useNfcScan(submitScan)
 
-    // Members without their card scan this with their phone instead.
-    const { image: qrImage, paused: qrPaused } = useQrCheckin(
-        ({ name, status }) => addResult({ kind: "success", name, status }),
-        onDeauthorized,
-    )
+    // --- Member codes read by the camera --------------------------------------
+
+    const scanner = useCodeScanner(async (code, scannedAt) => {
+        const key = addPending()
+        try {
+            const r = await scanCode(code, scannedAt, crypto.randomUUID())
+            resolvePopup(key, { kind: "success", name: r.name, status: r.status })
+            return { ok: true, label: r.first_name }
+        } catch (err) {
+            if (err instanceof ApiError && err.status === 401) {
+                onDeauthorized()
+                return { ok: false, label: "" }
+            }
+            resolvePopup(key, { kind: "error", message: err instanceof Error ? err.message : "Scan failed" })
+            return { ok: false, label: "Try again" }
+        }
+    })
 
     function handleSubmit(e: React.FormEvent) {
         e.preventDefault()
         const scanned = id.trim()
         setId("")
         if (scanned === ADMIN_EXIT_CODE) {
-            // The window is fullscreen and refuses to close, so this is the only way out.
             if (isTauri()) void invoke("exit_app")
             return
         }
@@ -163,61 +192,106 @@ export default function KioskPage({ onDeauthorized }: {
     }
 
     return (
-        <div className="relative min-h-screen flex flex-col items-center justify-center px-4 py-8 gap-6">
-            <KioskHeader />
+        <div className="relative h-screen flex flex-col items-center gap-4 pt-6 overflow-hidden">
+            <KioskTitle />
+            <CloseAppButton />
 
-            <div className="w-full max-w-xl rounded-xl border p-8 flex flex-col items-center gap-6 backdrop-blur-sm" style={cardStyle}>
-                <RecentList entries={recent} pending={pending} now={now} ttlMs={ENTRY_TTL_MS} fadeMs={ENTRY_FADE_MS} />
-                <div className="flex flex-col items-center gap-4 py-4 text-center">
-                    <Nfc size={recent.length || pending ? 40 : 64} className="theme-h1-color" />
-                    <div>
-                        <p className="text-xs font-semibold tracking-wider theme-subtext-color">CHECK IN / CHECK OUT</p>
-                        <h2 className="text-xl font-bold theme-text">Ready to tap</h2>
-                    </div>
-                    <div className="flex flex-col items-center gap-2 border-t pt-4 w-full" style={{ borderColor: "var(--theme-border)" }}>
-                        <p className="text-xs font-semibold tracking-wider theme-subtext-color flex items-center gap-1.5">
-                            <QrCode size={14} /> NO CARD? SCAN WITH YOUR PHONE
-                        </p>
-                        {qrImage
-                            ? <img src={qrImage} alt="Check-in QR code" width={224} height={224} className="rounded-lg" />
-                            : <div className="w-56 h-56 rounded-lg flex items-center justify-center text-sm theme-subtext-color border" style={{ borderColor: "var(--theme-border)" }}>{qrPaused ? "Tap the screen to show the QR code" : "QR code unavailable"}</div>}
-                        <p className="text-xs theme-subtext-color">Sign in to SprocketStats on your phone first.</p>
-                    </div>
-                </div>
-
-                {/* Invisible capture layer: a keyboard-wedge reader types into
-                    this always-focused input; the trailing Enter submits it. */}
-                <form onSubmit={handleSubmit} aria-hidden="true">
-                    <input
-                        ref={inputRef}
-                        value={id}
-                        onChange={(e) => setId(e.target.value)}
-                        onBlur={() => inputRef.current?.focus()}
-                        autoComplete="off"
-                        className="absolute h-0 w-0 opacity-0 pointer-events-none"
-                    />
-                </form>
+            <div className="h-[204px] w-[520px] max-w-[92vw] shrink-0 flex flex-col gap-1.5" aria-live="polite">
+                {popups.length > 0
+                    ? popups.map((p) => (
+                        <PopupRow key={p.key} popup={p} fading={p.kind !== "pending" && now - p.at > POPUP_TTL_MS - POPUP_FADE_MS} />
+                    ))
+                    : <IdleClock />}
             </div>
 
-            {/* One stray tap shouldn't knock the kiosk offline until a captain
-                comes by, so deauthorizing takes a deliberate second step. */}
-            {confirmingLogout ? (
-                <div className="flex flex-col items-center gap-2 text-center">
-                    <p className="text-sm theme-subtext-color">
-                        Deauthorize? A captain's code is needed to set it up again.
-                    </p>
-                    <div className="flex gap-4">
-                        <LinkButton onClick={() => setConfirmingLogout(false)}>Cancel</LinkButton>
-                        <LinkButton onClick={() => void handleDeauthorize()} className="text-red-400!">
-                            Yes, deauthorize
-                        </LinkButton>
-                    </div>
+            <CameraPreview {...scanner} />
+
+            <div className="grid grid-cols-3 items-center" style={{ width: PREVIEW_WIDTH }}>
+                <div />
+                <p className="text-center text-2xl font-semibold theme-text">Scan code or tap card</p>
+                <div className="flex justify-end">
+                    {/* One stray tap shouldn't knock the kiosk offline until a captain
+                        comes by, so deauthorizing takes a deliberate second step. */}
+                    {confirmingLogout ? (
+                        <div className="flex items-center gap-4 text-right">
+                            <span className="text-sm theme-subtext-color">Deauthorize?</span>
+                            <LinkButton onClick={() => setConfirmingLogout(false)}>Cancel</LinkButton>
+                            <LinkButton onClick={() => void handleDeauthorize()} className="text-red-400!">
+                                Yes, deauthorize
+                            </LinkButton>
+                        </div>
+                    ) : (
+                        <LinkButton onClick={() => setConfirmingLogout(true)}>Deauthorize this kiosk</LinkButton>
+                    )}
                 </div>
-            ) : (
-                <LinkButton onClick={() => setConfirmingLogout(true)}>
-                    Deauthorize this kiosk
-                </LinkButton>
+            </div>
+
+            {/* Invisible capture layer: a keyboard-wedge reader types into
+                this always-focused input; the trailing Enter submits it. */}
+            <form onSubmit={handleSubmit} aria-hidden="true">
+                <input
+                    ref={inputRef}
+                    value={id}
+                    onChange={(e) => setId(e.target.value)}
+                    onBlur={() => inputRef.current?.focus()}
+                    autoComplete="off"
+                    className="absolute h-0 w-0 opacity-0 pointer-events-none"
+                />
+            </form>
+        </div>
+    )
+}
+
+function PopupRow({ popup, fading }: { popup: Popup, fading: boolean }) {
+    return (
+        <div
+            className="flex items-center gap-3 rounded-xl border px-4 py-2.5 backdrop-blur-sm transition-opacity duration-500"
+            style={{ background: "var(--theme-bg)", borderColor: "var(--theme-border)", opacity: fading ? 0 : 1 }}
+        >
+            {popup.kind === "pending" && (
+                <>
+                    <Loader2 size={22} className="theme-h1-color shrink-0 animate-spin" />
+                    <p className="text-lg font-semibold theme-text">Checking…</p>
+                </>
             )}
+            {popup.kind === "success" && (
+                <>
+                    {popup.status === "checked_in"
+                        ? <CheckCircle2 size={22} className="theme-text-contrast shrink-0" />
+                        : <LogOut size={22} className="theme-subtext-color shrink-0" />}
+                    <p className="text-lg font-semibold theme-text truncate">
+                        {popup.name}{" "}
+                        <span className="theme-subtext-color font-normal">
+                            checked {popup.status === "checked_in" ? "in" : "out"}
+                        </span>
+                    </p>
+                </>
+            )}
+            {popup.kind === "error" && (
+                <>
+                    <XCircle size={22} className="text-red-500 shrink-0" />
+                    <p className="text-lg font-semibold theme-text truncate">{popup.message}</p>
+                </>
+            )}
+        </div>
+    )
+}
+
+/** Shown in the popup area when nothing is happening. */
+function IdleClock() {
+    const [time, setTime] = useState(() => new Date())
+    useEffect(() => {
+        const t = window.setInterval(() => setTime(new Date()), 10_000)
+        return () => window.clearInterval(t)
+    }, [])
+    return (
+        <div className="h-full flex flex-col items-center justify-center gap-0.5">
+            <p className="text-[84px] leading-[92px] font-light tracking-tight tabular-nums theme-h1-color">
+                {time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+            </p>
+            <p className="text-[22px] leading-[30px] theme-subtext-color">
+                {time.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}
+            </p>
         </div>
     )
 }

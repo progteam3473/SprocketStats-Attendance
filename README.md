@@ -1,13 +1,38 @@
 # SprocketStats-Attendance
 
-Attendance kiosk for FRC Team Sprocket 3473. Members tap their NFC ID card on an
-ACR122U reader and the kiosk checks them in against the SprocketStats backend.
+Attendance kiosk for FRC Team Sprocket 3473. Members check in or out by holding
+up the code from the SprocketStats app to the kiosk's camera, or by tapping their
+NFC ID card on an ACR122U reader.
 
 It is a Tauri 2 desktop app: a React 19 + Vite + Tailwind 4 frontend, with a Rust
 side (`src-tauri/`) that talks to the card reader. The same frontend is also
 deployed to Vercel as a web build.
 
 ## How it works
+
+### Member codes (camera)
+
+Each member's app shows a 14x14 Data Matrix code (the QR button on the
+dashboard) that changes every 10 seconds. It holds 16 digits: the member's
+4-digit code number and a 12-digit tag computed from a secret only that
+member's devices and the backend know. The code is black on gray rather than
+on white, so a bright phone screen doesn't overexpose the webcam.
+
+1. The kiosk keeps the built-in webcam on and shows it full width, mirrored.
+2. A web worker (`src/lib/scanWorker.ts`) decodes every frame with zxing-wasm and
+   returns each code's text and corners.
+3. `src/lib/useCodeScanner.ts` tracks codes by code number. A code that appears
+   is sent to `/kiosk/scan` once, with the time it was seen (on the server's
+   clock, from `/kiosk/clock`) and a random `scan_id`, so a retried request
+   can't toggle twice.
+4. The backend checks the tag against that time and toggles attendance. The
+   kiosk outlines the code and labels it with the member's first name, and the
+   result appears in the stack at the top.
+5. To scan again (say it showed "checked out" when they meant to check in), the
+   member turns the phone away until the code has been gone for 10 frames and
+   0.8 seconds, then back. Shorter dropouts are ignored.
+
+### NFC cards
 
 1. A background Rust thread polls the ACR122U over PC/SC (the `pcsc` crate).
 2. When a card is presented it reads the NDEF text record holding the member's
@@ -23,16 +48,23 @@ This is also how the Vercel web build receives scans, since it has no PC/SC acce
 
 ## Kiosk flow
 
-- **Setup page**: on first start, a captain authorizes the kiosk by entering their
-  offline code. The backend answers with an httponly `kiosk_auth` cookie that is
-  sent with every later request.
-- **Kiosk page**: the main screen. It waits for card taps and shows each check-in
-  result.
-- **QR check-in**: for members without their card. The kiosk shows a QR code that
-  rotates every 15 seconds and works once. The member scans it with their phone
-  (signed in to SprocketStats), which opens `/checkin` on the main app and checks
-  them in or out. Holding a live code proves they are at the kiosk, so no admin
-  countersign is needed. The kiosk polls the backend for the result.
+- **Setup page**: on first start, a captain (or a scouting lead or member) holds
+  their code up to the camera. The backend registers the kiosk and answers with
+  an httponly `kiosk_auth` cookie that is sent with every later request.
+- **Kiosk page**: the main screen. The camera preview fills the middle, results
+  stack at the top (newest first, at most 4, each gone after 5 seconds), and a
+  clock shows when nothing is happening.
+- **Deauthorize**: the link under the camera, confirmed with a second click,
+  revokes the kiosk on the server and returns to setup.
+
+## Camera
+
+The kiosk asks the default camera for 1920×1080 and takes the closest it
+offers. A 720p laptop webcam reads codes from roughly 0.9 m (or 1.4 m if it
+is sharp); a 1080p one from about 1.3 m. Point it at where people stand in
+line, at about face height. Windows
+(WebView2) and macOS ask for camera permission on first start; the macOS
+prompt text is in `src-tauri/Info.plist`.
 
 ## Prerequisites
 
@@ -84,8 +116,8 @@ deploy the web build to Vercel.
 ## Kiosk behavior
 
 - The window is fullscreen, undecorated and always on top.
-- Closing the window is blocked. To quit, kill the process (for example from a
-  terminal or the task manager).
+- Closing the window is blocked. To quit, click the faint X in the top-right
+  corner, type the admin exit code on a keyboard, or kill the process.
 - Logs go to stdout and to the OS app log directory for the identifier
   `org.team3473.attendance`:
   - Linux: `~/.local/share/org.team3473.attendance/logs/`
