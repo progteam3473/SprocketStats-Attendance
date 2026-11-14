@@ -15,7 +15,7 @@ export class ApiError extends Error {
     }
 }
 
-// The kiosk_auth cookie set by verify_code is httponly, so every call just
+// The kiosk_auth cookie set by /kiosk/authorize is httponly, so every call just
 // rides on credentials: "include" — the browser attaches it for us.
 async function post<T>(path: string, body: unknown): Promise<T> {
     let res: Response
@@ -43,16 +43,27 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     return res.json() as Promise<T>
 }
 
-export const verifyCode = (code: string) => post<boolean>("/kiosk/verify_code", { code })
+/** A card tap (built-in NFC reader or a USB keyboard reader). */
 export const verifyId = (id: string) => post<VerifyIdResult>("/kiosk/verify_id", { id })
-export interface QrCode {
-    token: string
-    url: string
-    expires_in: number
+
+export interface CodeScanResult extends VerifyIdResult {
+    first_name: string
+    /** The same member was just scanned; nothing changed. */
+    repeat: boolean
 }
-export interface QrScan extends VerifyIdResult {
-    token: string
-}
-export const fetchQrCode = () => post<QrCode>("/kiosk/qr_code", {})
-export const fetchQrScans = (tokens: string[]) => post<QrScan[]>("/kiosk/qr_status", { tokens })
+
+/**
+ * A member code read by the camera. `scannedAt` is server-corrected ms; the
+ * server judges the code against it. `scanId` is made once per appearance of a
+ * phone so a retry can't toggle attendance twice.
+ */
+export const scanCode = (code: string, scannedAt: number, scanId: string) =>
+    post<CodeScanResult>("/kiosk/scan", { code, scanned_at: scannedAt / 1000, scan_id: scanId })
+
+/** Set up this kiosk from the code of a member allowed to authorize kiosks. */
+export const authorizeKiosk = (code: string, scannedAt: number, scanId: string) =>
+    post<{ kiosk_id: string, authorized_by: string }>("/kiosk/authorize", {
+        code, scanned_at: scannedAt / 1000, scan_id: scanId,
+    })
+
 export const kioskLogout = () => post<{ ok: boolean }>("/kiosk/verify_logout", {})

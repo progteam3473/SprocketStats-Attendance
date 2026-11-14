@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- macOS only: required before the app may open the camera to read member codes. -->
+    <key>NSCameraUsageDescription</key>
+    <string>The kiosk reads members' check-in codes with the camera.</string>
+</dict>
+</plist>

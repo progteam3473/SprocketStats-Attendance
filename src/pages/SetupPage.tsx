@@ -1,70 +1,82 @@
-import { useState } from "react"
-import { KeyRound, ShieldCheck } from "lucide-react"
-import { verifyCode } from "@/lib/api"
+import { useRef, useState } from "react"
+import { Loader2, ShieldCheck, XCircle } from "lucide-react"
+import { authorizeKiosk } from "@/lib/api"
+import { useServerClock } from "@/lib/clock"
 import { useNfcScan } from "@/lib/nfc"
-import { CardTitle, CodeField, KioskHeader, PrimaryButton, cardClass, cardStyle } from "@/components/kiosk"
+import { useCodeScanner } from "@/lib/useCodeScanner"
+import { CameraPreview } from "@/components/CameraPreview"
+import { CloseAppButton, KioskTitle, cardStyle } from "@/components/kiosk"
+
+type SetupState =
+    | { kind: "waiting" }
+    | { kind: "checking" }
+    | { kind: "error", message: string }
 
 /**
- * First-startup screen: a captain / scouting member enters their offline code
- * once. The backend verifies it and answers with an httponly kiosk_auth
- * cookie, which the browser then sends with every later request.
+ * First-startup screen: a member allowed to authorize kiosks (captains and
+ * scouting leads/members) shows their code from the app to the camera. The
+ * backend checks it and answers with an httponly kiosk_auth cookie naming this
+ * kiosk, which the browser then sends with every later request.
  */
 export default function SetupPage({ onAuthorized }: { onAuthorized: () => void }) {
-    const [code, setCode] = useState("")
-    const [submitting, setSubmitting] = useState(false)
-    const [error, setError] = useState<string | null>(null)
+    const [state, setState] = useState<SetupState>({ kind: "waiting" })
+    const busy = useRef(false)
 
     // Card taps can't be recorded until the kiosk is authorized.
     useNfcScan(null)
+    useServerClock()
 
-    async function handleSubmit(e: React.FormEvent) {
-        e.preventDefault()
-        const trimmed = code.trim()
-        if (!trimmed || submitting) return
-        setSubmitting(true)
-        setError(null)
+    const scanner = useCodeScanner(async (code, scannedAt) => {
+        if (busy.current) return { ok: false, label: "One at a time" }
+        busy.current = true
+        setState({ kind: "checking" })
         try {
-            await verifyCode(trimmed)
+            await authorizeKiosk(code, scannedAt, crypto.randomUUID())
             onAuthorized()
+            return { ok: true, label: "Authorized" }
         } catch (err) {
-            setError(err instanceof Error ? err.message : "Failed to authorize kiosk")
+            setState({ kind: "error", message: err instanceof Error ? err.message : "Couldn't authorize this kiosk" })
+            return { ok: false, label: "Not allowed" }
         } finally {
-            setSubmitting(false)
+            busy.current = false
         }
-    }
+    })
 
     return (
-        <div className="min-h-screen flex flex-col items-center justify-center px-4 py-8 gap-6">
-            <KioskHeader />
+        <div className="relative h-screen flex flex-col items-center gap-4 pt-6 overflow-hidden">
+            <KioskTitle />
+            <CloseAppButton />
 
-            <form onSubmit={(e) => void handleSubmit(e)} className={cardClass} style={cardStyle}>
-                <CardTitle icon={ShieldCheck} eyebrow="KIOSK SETUP" title="Authorize this kiosk" />
+            <div className="h-[204px] shrink-0 flex items-center justify-center">
+                <div
+                    className="w-[448px] max-w-[92vw] rounded-xl border p-6 flex flex-col items-center gap-3 text-center backdrop-blur-sm"
+                    style={cardStyle}
+                >
+                    <div className="flex items-center gap-2.5">
+                        <ShieldCheck size={26} className="theme-text-contrast" />
+                        <h2 className="text-2xl font-bold theme-text">Authorize this kiosk</h2>
+                    </div>
+                    {state.kind === "error" && (
+                        <div
+                            className="w-full flex items-center justify-center gap-2.5 rounded-lg border px-3 py-2.5"
+                            style={{ borderColor: "var(--theme-border)", background: "color-mix(in oklch, var(--theme-border) 40%, transparent)" }}
+                        >
+                            <XCircle size={20} className="text-red-400 shrink-0" />
+                            <p className="text-[15px] theme-text">{state.message}</p>
+                        </div>
+                    )}
+                    {state.kind === "checking" ? (
+                        <div role="status" className="flex items-center gap-2.5">
+                            <Loader2 size={22} className="theme-h1-color animate-spin" />
+                            <p className="text-lg font-semibold theme-text">Checking…</p>
+                        </div>
+                    ) : (
+                        <p className="text-lg font-semibold theme-text">Scan a captain's code</p>
+                    )}
+                </div>
+            </div>
 
-                <p className="text-sm theme-subtext-color leading-relaxed">
-                    Enter your offline code to unlock this device for attendance
-                    check-ins. It stays authorized until it's logged out.
-                </p>
-
-                <CodeField
-                    icon={KeyRound}
-                    value={code}
-                    onChange={(e) => setCode(e.target.value)}
-                    placeholder="Offline code"
-                    autoFocus
-                />
-
-                <PrimaryButton type="submit" disabled={submitting || !code.trim()}>
-                    <ShieldCheck size={16} />
-                    {submitting ? "Authorizing…" : "Authorize kiosk"}
-                </PrimaryButton>
-
-                {error && (
-                    <p className="text-sm px-3 py-2 rounded-lg border theme-subtext-color theme-border"
-                       style={{ background: "color-mix(in oklch, var(--theme-border) 40%, transparent)" }}>
-                        {error}
-                    </p>
-                )}
-            </form>
+            <CameraPreview {...scanner} />
         </div>
     )
 }
