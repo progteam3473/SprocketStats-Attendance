@@ -1,6 +1,6 @@
 import { useRef, useState } from "react"
 import { Loader2, ShieldCheck, XCircle } from "lucide-react"
-import { authorizeKiosk } from "@/lib/api"
+import { ApiError, authorizeKiosk } from "@/lib/api"
 import { useServerClock } from "@/lib/clock"
 import { useNfcScan } from "@/lib/nfc"
 import { useCodeScanner } from "@/lib/useCodeScanner"
@@ -36,6 +36,9 @@ export default function SetupPage({ onAuthorized }: { onAuthorized: () => void }
             return { ok: true, label: "Authorized" }
         } catch (err) {
             setState({ kind: "error", message: err instanceof Error ? err.message : "Couldn't authorize this kiosk" })
+            // LEGACY-16-DIGIT: 426 means the phone showed an old-format code.
+            // Delete in the next update; see NEXT_UPDATE_CLEANUP.md in SprocketStats-2.0.
+            if (err instanceof ApiError && err.status === 426) return { ok: false, label: "Update app" }
             return { ok: false, label: "Not allowed" }
         } finally {
             busy.current = false

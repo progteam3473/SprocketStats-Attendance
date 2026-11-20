@@ -2,9 +2,15 @@ import { useEffect, useRef, useState } from "react"
 import { serverNow } from "@/lib/clock"
 import type { FoundCode, Point, WorkerRequest, WorkerResponse } from "@/lib/scanWorker"
 
-// 4-digit member code number + 12-digit tag (backend/core/member_codes.py).
-// Tracks are keyed by the number, which stays the same as the tag rotates.
-const MEMBER_CODE = /^(\d{4})\d{12}$/
+// Header "00" (format v0, check-in) + 4-digit member code number + 18-digit tag
+// (backend/core/member_codes.py). Other headers, such as "01" for electrical
+// inventory, aren't check-ins and are ignored. Tracks are keyed by the number,
+// which stays the same as the tag rotates.
+const MEMBER_CODE = /^00(\d{4})\d{18}$/
+// LEGACY-16-DIGIT: a code from an app build before the header (4-digit number +
+// 12-digit tag). Passed on so the server can tell the member to update the app.
+// Delete in the next update; see NEXT_UPDATE_CLEANUP.md in SprocketStats-2.0.
+const LEGACY_CODE = /^(\d{4})\d{12}$/
 
 // An appearance ends only after this many processed frames without the
 // member's code AND this long since it was last seen, so a frame the decoder
@@ -83,7 +89,7 @@ export function useCodeScanner(onAppear: (code: string, scannedAt: number) => Pr
                     unreadable.push(c.quad)
                     continue
                 }
-                const m = MEMBER_CODE.exec(c.text)
+                const m = MEMBER_CODE.exec(c.text) ?? LEGACY_CODE.exec(c.text)
                 if (!m) continue // some other Data Matrix
                 const codeNumber = m[1]
                 seen.add(codeNumber)

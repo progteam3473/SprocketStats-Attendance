@@ -12,11 +12,24 @@ deployed to Vercel as a web build.
 
 ### Member codes (camera)
 
-Each member's app shows a 14x14 Data Matrix code (the QR button on the
-dashboard) that changes every 10 seconds. It holds 16 digits: the member's
-4-digit code number and a 12-digit tag computed from a secret only that
-member's devices and the backend know. The code is black on gray rather than
-on white, so a bright phone screen doesn't overexpose the webcam.
+Each member's app shows a 16x16 Data Matrix code (the QR button on the
+dashboard) that changes every 10 seconds. It holds 24 digits:
+
+- a 2-digit header packing a 2-bit format version and a 4-bit type
+  (`version * 16 + type`), so check-in codes start with `00` and `01` is
+  reserved for electrical inventory,
+- the member's 4-digit code number,
+- an 18-digit tag computed from a secret only that member's devices and the
+  backend know.
+
+The kiosk only acts on `00` codes and ignores any other Data Matrix. The code
+is black on gray rather than on white, so a bright phone screen doesn't
+overexpose the webcam.
+
+Until the next update, a 16-digit code from an older app build is still sent
+to the server, which answers with a message asking the member to update their
+app (shown as "Update app" on the camera). See `NEXT_UPDATE_CLEANUP.md` in
+SprocketStats-2.0 for removing that.
 
 1. The kiosk keeps the built-in webcam on and shows it full width, mirrored.
 2. A web worker (`src/lib/scanWorker.ts`) decodes every frame with zxing-wasm and

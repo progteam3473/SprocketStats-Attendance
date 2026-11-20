@@ -167,6 +167,9 @@ export default function KioskPage({ onDeauthorized }: {
                 return { ok: false, label: "" }
             }
             resolvePopup(key, { kind: "error", message: err instanceof Error ? err.message : "Scan failed" })
+            // LEGACY-16-DIGIT: 426 means the phone showed an old-format code.
+            // Delete in the next update; see NEXT_UPDATE_CLEANUP.md in SprocketStats-2.0.
+            if (err instanceof ApiError && err.status === 426) return { ok: false, label: "Update app" }
             return { ok: false, label: "Try again" }
         }
     })
