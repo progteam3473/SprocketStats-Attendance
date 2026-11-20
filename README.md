@@ -136,4 +136,5 @@ installers and publishes them as a GitHub release.
 2. Bump `version` in both `package.json` and `src-tauri/Cargo.toml`
    (`tauri.conf.json` reads `package.json`). The workflow refuses a tag that
    doesn't match both.
-3. Commit, then tag and push: `git tag v1.0.1 && git push origin v1.0.1`.
+3. Commit, then tag and push the new version:
+   `git tag v<version> && git push origin v<version>`.
