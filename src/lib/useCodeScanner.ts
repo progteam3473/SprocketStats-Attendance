@@ -2,9 +2,19 @@ import { useEffect, useRef, useState } from "react"
 import { serverNow } from "@/lib/clock"
 import type { FoundCode, Point, WorkerRequest, WorkerResponse } from "@/lib/scanWorker"
 
-// 4-digit member code number + 12-digit tag (backend/core/member_codes.py).
-// Tracks are keyed by the number, which stays the same as the tag rotates.
-const MEMBER_CODE = /^(\d{4})\d{12}$/
+// Header "00" (format v0, check-in) + 4-digit member code number + 18-digit tag,
+// shown as a 16x16 Data Matrix (backend/core/member_codes.py). Tracks are keyed
+// by the number, which stays the same as the tag rotates.
+const MEMBER_CODE = /^00(\d{4})\d{18}$/
+// LEGACY-16-DIGIT: 4-digit number + 12-digit tag (14x14) from app builds before
+// the header. Still sent so the server can tell the member to update; remove
+// when the backend drops legacy codes.
+const LEGACY_MEMBER_CODE = /^(\d{4})\d{12}$/
+
+/** The member code number in a check-in code, else null (some other Data Matrix). */
+function codeNumberOf(text: string): string | null {
+    return (MEMBER_CODE.exec(text) ?? LEGACY_MEMBER_CODE.exec(text))?.[1] ?? null
+}
 
 // An appearance ends only after this many processed frames without the
 // member's code AND this long since it was last seen, so a frame the decoder
@@ -83,9 +93,8 @@ export function useCodeScanner(onAppear: (code: string, scannedAt: number) => Pr
                     unreadable.push(c.quad)
                     continue
                 }
-                const m = MEMBER_CODE.exec(c.text)
-                if (!m) continue // some other Data Matrix
-                const codeNumber = m[1]
+                const codeNumber = codeNumberOf(c.text)
+                if (!codeNumber) continue // some other Data Matrix
                 seen.add(codeNumber)
                 const existing = live.get(codeNumber)
                 if (existing) {

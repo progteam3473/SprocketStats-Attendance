@@ -12,10 +12,12 @@ deployed to Vercel as a web build.
 
 ### Member codes (camera)
 
-Each member's app shows a 14x14 Data Matrix code (the QR button on the
-dashboard) that changes every 10 seconds. It holds 16 digits: the member's
-4-digit code number and a 12-digit tag computed from a secret only that
-member's devices and the backend know. The code is black on gray rather than
+Each member's app shows a 16x16 Data Matrix code (the QR button on the
+dashboard) that changes every 10 seconds. It holds 24 digits: a 2-digit header
+(`00` for a check-in code), the member's 4-digit code number, and an 18-digit
+tag computed from a secret only that member's devices and the backend know.
+Older app builds show a 14x14 code with 16 digits (no header); the kiosk still
+sends those so the server can tell the member to update. The code is black on gray rather than
 on white, so a bright phone screen doesn't overexpose the webcam.
 
 1. The kiosk keeps the built-in webcam on and shows it full width, mirrored.
